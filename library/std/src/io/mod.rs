@@ -360,7 +360,11 @@ where
 //
 // Because we're extending the buffer with uninitialized data for trusted
 // readers, we need to make sure to truncate that if any of this panics.
-pub(crate) fn default_read_to_end<R: Read + ?Sized>(r: &mut R, buf: &mut Vec<u8>) -> Result<usize> {
+fn default_read_to_end<R: Read + ?Sized>(r: &mut R, buf: &mut Vec<u8>) -> Result<usize> {
+    // Don't worry about `usize` overflow because reading will fail regardless
+    // in that case.
+    buf.reserve(r.remaining_hint().0 as usize);
+
     let start_len = buf.len();
     let start_cap = buf.capacity();
     let mut g = Guard { len: buf.len(), buf };
@@ -423,22 +427,6 @@ pub(crate) fn default_read_to_end<R: Read + ?Sized>(r: &mut R, buf: &mut Vec<u8>
             }
         }
     }
-}
-
-pub(crate) fn default_read_to_string<R: Read + ?Sized>(
-    r: &mut R,
-    buf: &mut String,
-) -> Result<usize> {
-    // Note that we do *not* call `r.read_to_end()` here. We are passing
-    // `&mut Vec<u8>` (the raw contents of `buf`) into the `read_to_end`
-    // method to fill it up. An arbitrary implementation could overwrite the
-    // entire contents of the vector, not just append to it (which is what
-    // we are expecting).
-    //
-    // To prevent extraneously checking the UTF-8-ness of the entire buffer
-    // we pass it to our hardcoded `default_read_to_end` implementation which
-    // we know is guaranteed to only read data into the end of the buffer.
-    unsafe { append_to_string(buf, |b| default_read_to_end(r, b)) }
 }
 
 pub(crate) fn default_read_vectored<F>(read: F, bufs: &mut [IoSliceMut<'_>]) -> Result<usize>
@@ -774,7 +762,48 @@ pub trait Read {
     /// [`std::fs::read_to_string`]: crate::fs::read_to_string
     #[stable(feature = "rust1", since = "1.0.0")]
     fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
-        default_read_to_string(self, buf)
+        // Note that we do *not* call `r.read_to_end()` here. We are passing
+        // `&mut Vec<u8>` (the raw contents of `buf`) into the `read_to_end`
+        // method to fill it up. An arbitrary implementation could overwrite the
+        // entire contents of the vector, not just append to it (which is what
+        // we are expecting).
+        //
+        // To prevent extraneously checking the UTF-8-ness of the entire buffer
+        // we pass it to our hardcoded `default_read_to_end` implementation which
+        // we know is guaranteed to only read data into the end of the buffer.
+        unsafe { append_to_string(buf, |b| default_read_to_end(self, b)) }
+    }
+
+    /// Returns the bounds on the number of bytes remaining to be read.
+    ///
+    /// Specifically, `remaining_hint()` returns a tuple where the first element
+    /// is the lower bound, and the second element is the upper bound.
+    ///
+    /// The second half of the tuple that is returned is an <code>[Option]<[usize]></code>.
+    /// A [`None`] here means that either there is no known upper bound, or the
+    /// upper bound is larger than [`u64`].
+    ///
+    /// # Implementation notes
+    ///
+    /// It is not enforced that a reader implementation yields the declared
+    /// number of bytes. A reader may yield less than the lower bound or more
+    /// than the upper bound of bytes. A file could be truncated or appended
+    /// to after calculating its size, for instance.
+    ///
+    /// `remaining_hint()` is primarily intended to be used for optimizations
+    /// such as reserving space for the elements of the stream, but must not be
+    /// trusted to e.g., omit bounds checks in unsafe code. An incorrect
+    /// implementation of `remaining_hint()` should not lead to memory safety
+    /// violations.
+    ///
+    /// That said, the implementation should provide a correct estimation,
+    /// because otherwise it would be a violation of the trait's protocol.
+    ///
+    /// The default implementation returns <code>(0, [None])</code> which is
+    /// correct for any reader.
+    #[unstable(feature = "remaining_hint", issue = "none")]
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        (0, None)
     }
 
     /// Read the exact number of bytes required to fill `buf`.
@@ -2407,6 +2436,18 @@ impl<T: Read, U: Read> Read for Chain<T, U> {
         let initializer = self.first.initializer();
         if initializer.should_initialize() { initializer } else { self.second.initializer() }
     }
+
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        let first_hint = self.first.remaining_hint();
+        let second_hint = self.second.remaining_hint();
+
+        let lower = first_hint.0 + second_hint.0;
+        let upper = match (first_hint.1, second_hint.1) {
+            (Some(first), Some(second)) => first.checked_add(second),
+            _ => None,
+        };
+        (lower, upper)
+    }
 }
 
 #[stable(feature = "chain_bufread", since = "1.9.0")]
@@ -2611,6 +2652,13 @@ impl<T: Read> Read for Take<T> {
 
     unsafe fn initializer(&self) -> Initializer {
         self.inner.initializer()
+    }
+
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        let (lower, upper) = self.inner.remaining_hint();
+        let lower = cmp::min(lower, self.limit);
+        let upper = upper.map(|u| cmp::min(u, self.limit));
+        (lower, upper)
     }
 }
 

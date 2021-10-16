@@ -3,6 +3,7 @@ mod tests;
 
 use crate::alloc::Allocator;
 use crate::cmp;
+use crate::convert::TryInto;
 use crate::fmt;
 use crate::io::{
     self, BufRead, Error, ErrorKind, Initializer, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write,
@@ -47,6 +48,11 @@ impl<R: Read + ?Sized> Read for &mut R {
     #[inline]
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         (**self).read_exact(buf)
+    }
+
+    #[inline]
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        (**self).remaining_hint()
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -151,6 +157,11 @@ impl<R: Read + ?Sized> Read for Box<R> {
     #[inline]
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         (**self).read_exact(buf)
+    }
+
+    #[inline]
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        (**self).remaining_hint()
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -296,6 +307,12 @@ impl Read for &[u8] {
         let len = self.len();
         *self = &self[len..];
         Ok(len)
+    }
+
+    #[inline]
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        let len: u64 = self.len().try_into().unwrap_or(u64::MAX);
+        (len, Some(len))
     }
 }
 

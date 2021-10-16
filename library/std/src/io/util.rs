@@ -49,6 +49,11 @@ impl Read for Empty {
     unsafe fn initializer(&self) -> Initializer {
         Initializer::nop()
     }
+
+    #[inline]
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        (0, Some(0))
+    }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
 impl BufRead for Empty {

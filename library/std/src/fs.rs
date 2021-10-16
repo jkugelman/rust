@@ -604,13 +604,15 @@ impl fmt::Debug for File {
     }
 }
 
-/// Indicates how much extra capacity is needed to read the rest of the file.
-fn buffer_capacity_required(mut file: &File) -> usize {
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let pos = file.stream_position().unwrap_or(0);
-    // Don't worry about `usize` overflow because reading will fail regardless
-    // in that case.
-    size.saturating_sub(pos) as usize
+fn remaining_hint(mut file: &File) -> (u64, Option<u64>) {
+    let size = file.metadata().map(|m| m.len()).ok();
+    let pos = file.stream_position().ok();
+
+    let bound = match (size, pos) {
+        (Some(size), Some(pos)) => size.saturating_sub(pos),
+        _ => 0,
+    };
+    (bound, Some(bound))
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -634,16 +636,8 @@ impl Read for File {
         unsafe { Initializer::nop() }
     }
 
-    // Reserves space in the buffer based on the file size when available.
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        buf.reserve(buffer_capacity_required(self));
-        io::default_read_to_end(self, buf)
-    }
-
-    // Reserves space in the buffer based on the file size when available.
-    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        buf.reserve(buffer_capacity_required(self));
-        io::default_read_to_string(self, buf)
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        remaining_hint(self)
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -692,16 +686,8 @@ impl Read for &File {
         unsafe { Initializer::nop() }
     }
 
-    // Reserves space in the buffer based on the file size when available.
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        buf.reserve(buffer_capacity_required(self));
-        io::default_read_to_end(self, buf)
-    }
-
-    // Reserves space in the buffer based on the file size when available.
-    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        buf.reserve(buffer_capacity_required(self));
-        io::default_read_to_string(self, buf)
+    fn remaining_hint(&self) -> (u64, Option<u64>) {
+        remaining_hint(self)
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
